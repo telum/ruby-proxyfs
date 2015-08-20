@@ -1,158 +1,107 @@
+require 'pathname'
+
+
+class Dir
+  def [] name
+    raise Errno::ENOENT unless include? name
+
+    fpath = File.join(path, name)
+
+    File.directory?(fpath) ? Dir.new(fpath) : File.open(fpath)
+  end
+end
+
+
 module ProxyFS
-  class VirtualDir
-    def initialize dir_data
+  class File
+    @path
+
+    def initialize path
+      @path = path
+    end
+
+    def read *args
+      e = fs.entry(@path)
+
+      if Array === e
+        f = e[0].new(*e[1..(-1)])
+        f.read *args
+      elsif Hash === e
+        raise ArgumentError, 'it is directory'
+      else
+        e.read *args
+      end
     end
   end
 
-  def self.dir root
-    res = Class.new
+  class Dir
+    def initialize path
+    end
+  end
 
-    res.class_eval do
-      def initialize
-        @root = root
-      end
+  class FS
+    @tree
+    attr_reader :dir,:file
 
-      def glob pattern, flags=nil, &block
-        raise ArgumentError, 'Relative path is not supported' if pattern[0] != '/'
+    def initialize tree
+      @tree = tree
+      iam = self
 
-        cFile = file @root
-        res = []
-        parts = pattern.split '/'
+      @dir = Class.new Dir do
+        @@fs = iam
 
-        lglob = Proc.new do |dir, parts|
-          parts.each_with_index do |part, i|
-            file_names = dir.select do |file| file.basename == part end
-            files = file_names.map do |name| cFile.new path+name end
-            
-            files.each do |file|
-              parts_rest = parts[i..(-1)]
-              lglob file, parts_rest if file.directory?
-              res << file if parts_rest.empty?
-            end
-          end
+        def self.fs
+          @@fs
         end
 
-        lglob[@root, parts]
+        def fs
+          @@fs
+        end
+      end
 
-        res
+      @file = Class.new File do
+        @@fs = iam
+
+        def self.fs
+          @@fs
+        end
+
+        def fs
+          @@fs
+        end
       end
     end
 
-    res
-  end
+    def entry path
+      path = Pathname.new path
 
-  def self.file root
-    res = Class.new
+      raise ArgumentError, 'path shall be absolute' unless path.absolute?
 
-    res.class_eval do
-      @@root = root
-      @file
-      @path
+      patha = path.each_filename.to_a
 
-      def initialize path, mode="r"
-        f = self.class.entry_by_path path
+      find = Proc.new do |patha, curdir|
+        name = patha[0]
+        raise Errno::ENOENT unless curdir.include? name
 
-        raise ArgumentError, 'Path is a directory' if f.directory?
+        e = curdir[name]
 
-        @file = f
-        @path = path
-      end
+        rest_patha = patha[1..(-1)]
 
-      def self.entry_by_path path
-        parts = path.split '/'
-
-        raise ArgumentError, 'Relative path is not supported' unless parts[0].empty?
-        parts.delete_at 0
-
-        dir = @@root
-
-        basename = parts.pop
-
-        parts.each do |part|
-          tmp = dir[part]
-
-          return nil unless tmp && tmp.directory?
-
-          dir = tmp
-        end
-
-        dir[basename]
-      end
-
-      def self.define_proxy_method method_name
-        define_method method_name do |*args, &block|
-          @file.send method_name, *args, &block
-        end
-      end
-
-      def self.define_singleton_proxy_method method_name
-        define_singleton_method method_name do |*args, &block|
-          file = self.new(args[0])
-          file_class = file.file_class
-
-          if file.file_class.respond_to? method_name
-            file_class.send method_name, file.real_file_path, *args[1..(-1)], &block
+        if rest_patha.empty?
+          e
+        else
+          if Hash === e
+            find[rest_patha, e]
+          elsif Array === e
+            find[rest_patha, e[0].new(*e[1..(-1)])]
           else
-            file.send method_name, *args[1..(-1)]
+            find[rest_patha, e]
           end
         end
       end
 
-      [
-        :read, :write, :size, :atime, :mtime, :ctime,
-        :flock, :truncate, :chmod, :chown, :binmode,
-        :seek
-      ].each do |method|
-        define_proxy_method method
-      end
-
-      [
-        :read, :write, :size, :atime, :mtime, :ctime,
-        :binread, :binwrite
-      ].each do |method|
-        define_singleton_proxy_method method
-      end
-
-      def self.binread *args
-          file = self.new(args.shift)
-          file.binmode
-
-          if args.count == 2
-            file.seek args.pop
-          end
-
-          file.read *args
-      end
-
-      def self.binwrite *args
-          file = self.new(args.shift)
-          file.binmode
-
-          if args.count == 2
-            file.seek args.pop
-          end
-
-          file.write *args
-      end
-
-      def path
-        @path
-      end
-
-      def to_path
-        path
-      end
-
-      def file_class
-        @file.class
-      end
-
-      def real_file_path
-        @file.path
-      end
+      find[patha, @tree]
     end
-
-    res
   end
 end
 
