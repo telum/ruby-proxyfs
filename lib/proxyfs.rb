@@ -1,216 +1,184 @@
 require 'pathname'
 
 
-class Dir
-  def [] name
-    raise Errno::ENOENT unless include? name
+#TODO:
+def path_next_entry base_path, path
+  base_path += '/' unless base_path[-1] == '/'
+  return nil unless path.index(base_path) == 0
 
-    fpath = File.join(path, name)
+  path[(base_path.length)..(-1)].split(File::SEPARATOR)[0]
+end
 
-    File.directory?(fpath) ? Dir.new(fpath) : File.open(fpath)
-  end
+#TODO:
+def path_next_entry_last? base_path, path
+  base_path += '/' unless base_path[-1] == '/'
+  return nil unless path.index(base_path) == 0
+
+  path[(base_path.length)..(-1)].split(File::SEPARATOR).count < 2
 end
 
 
 module ProxyFS
-  class File
-    @path
-    @entry
-    @file
+  module FsEntry
+    attr_accessor :root, :basename, :path
 
-    def initialize path
-      @path = path
-      @entry = fs.entry(@path)
+    def entry entry_path
+      cur_path = File.join(path, basename)
+      next_entry = path_next_entry cur_path, entry_path
+      puts "(#{cur_path}, #{entry_path}) => #{next_entry}"
 
-      puts @entry
-
-      raise Errno::ENOENT if @entry.nil?
-
-      if Array === @entry
-        @file = @entry[0].new(*@entry[1..(-1)])
-      elsif Hash === @entry
+      if path_next_entry_last? cur_path, entry_path
+        self[next_entry]
       else
-        @file = @entry
+        return nil unless DirEntry === self[next_entry]
+
+        self[next_entry].entry entry_path
       end
     end
 
-    define_proxy_method = Proc.new do |method_name|
-      define_method method_name do |*args, &block|
-        if Array === @entry
-            f = @file.nil? ? @entry[0].new(*@entry[1..(-1)]) : @file
-            f.send method_name, *args, &block
-        elsif Hash === @entry
-          raise ArgumentError, 'it is directory'
-        else
-          @entry.send method_name, *args, &block
-        end
-      end
+    def [] name
+      nil
     end
 
-    define_singleton_proxy_method = Proc.new do |method_name|
-      define_singleton_method method_name do |*args, &block|
-        e = fs.entry(args.shift)
-
-        raise Errno::ENOENT if e.nil?
-
-        if Array === e
-            f = e[0].new(*e[1..(-1)])
-            f.send method_name, *args, &block
-        elsif Hash === e
-          raise ArgumentError, 'it is directory'
-        else
-          e.class.send method_name, *args, &block
-        end
-      end
-    end
-
-    def self.binread name, length=nil, offset=nil
-      f = self.new name
-      f.binmode
-      f.seek offset if offset
-      f.read *([length].compact)
-    end
-
-    def self.binwrite name, string, offset=nil
-      f = self.new name
-      f.binmode
-      f.seek offset if offset
-      f.write string
-    end
-
-    def self.readable? path
-      !fs.entry(path).nil?
-    end
-
-    [:read, :write, :seek, :binmode, :exist?, :directory?, :size, :atime, :ctime, :mtime].each do |name|
-      define_proxy_method[name]
-    end
-
-    [:read, :write, :exist?, :directory?, :size, :atime, :ctime, :mtime].each do |name|
-      define_singleton_proxy_method[name]
-    end
-  end
-
-  class Dir
-    def initialize path
-    end
-
-    def self.glob pattern
-      puts Pathname.new(pattern).dirname.to_s
-      entries Pathname.new(pattern).dirname.to_s
-    end
-
-    def self.entries path
-      fs.entries(path).keys
-    end
-  end
-
-  class FS
-    @tree
-    attr_reader :dir,:file
-
-    def initialize tree
-      @tree = tree
-      iam = self
-
-      @dir = Class.new Dir do
-        @@fs = iam
-
-        def self.fs
-          @@fs
-        end
-
-        def fs
-          @@fs
-        end
-      end
-
-      @file = Class.new File do
-        @@fs = iam
-
-        def self.fs
-          @@fs
-        end
-
-        def fs
-          @@fs
-        end
-      end
-    end
-
-    def entry path
-      path = Pathname.new path
-
-      unless path.absolute?
-        path = Pathname.new('/' + path.to_s)
-      end
-
-      return nil unless path.absolute?
-
-      return @tree if path == Pathname.new('/')
-
-      patha = path.each_filename.to_a
-
-      find = Proc.new do |patha, curdir|
-        name = patha[0]
-        raise Errno::ENOENT, name unless curdir.include? name
-
-        e = curdir[name]
-
-        rest_patha = patha[1..(-1)]
-
-        if rest_patha.empty?
-          e
-        else
-          if Hash === e
-            find[rest_patha, e]
-          elsif Array === e
-            find[rest_patha, e[0].new(*e[1..(-1)])]
-          else
-            find[rest_patha, e]
-          end
-        end
-      end
-
-      find[patha, @tree]
-    end
-
-    def entries path
-      dirent = entry(path)
-
-      if Hash === dirent
-        dirent
-      elsif Array === dirent
-        dir = dirent[0].new(*dirent[1..(-1)])
-        raise ArgumentError, 'destination is not a directory' unless dir.respond_to?(:directory?) and dir.directory?
-        dir.entries.inject({}) do |hash,name|
-          hash[name] = dir[name]
-        end
-      else
-        dirent.entries.inject({}) do |hash,name|
-          hash[name] = dirent[name]
-        end
-      end
+    def each &block
     end
   end
 
   class FileEntry
-    @klass
-    @args
-
-    def initialize klass, *args
-      @klass = klass
-      @args = args
-    end
+    include FsEntry
   end
 
   class DirEntry
-    @klass
-    @args
+    include FsEntry
+  end
 
-    def initialize klass, *args
-      @klass = klass
-      @args = args
+  class VirtualDirEntry < DirEntry
+    @dir
+
+    def initialize dirDesc, options={}
+      @dir = dirDesc
+    end
+
+    def make_root
+      self.path = '/'
+      self.basename = '/'
+
+      dir_init = Proc.new do |dir|
+        dir.each do |(name, entry)|
+          entry.root = self
+          entry.basename = name
+          entry.path = File.join(dir.path, dir.basename)
+
+          dir_init[entry] if DirEntry === entry
+        end
+      end
+
+      dir_init[self]
+    end
+
+    def [] name
+      @dir[name]
+    end
+
+    def each &block
+      @dir.each do |(name,e)| yield [name, e] end
+    end
+
+    def class_file
+      iam = self
+      klass = Class.new do
+        @@root = iam
+
+        define_proxy_singleton_method = Proc.new do |method|
+          define_singleton_method method do |path, *args, &block|
+            e = @@root.entry path
+            e.class.send method, e, *args, &block
+          end
+        end
+
+        [:read, :write, :size, :binread, :binwrite].each do |method|
+          define_proxy_singleton_method[method]
+        end
+      end
+    end
+  end
+
+  class VirtualFileEntry < FileEntry
+    @data
+
+    def initialize data
+      @data = StringIO.new data.to_s
+    end
+
+    define_proxy_method = Proc.new do |method|
+      define_method method do |*args, &block|
+        @data.send method, *args, &block
+      end
+    end
+
+    [:read, :write, :size, :seek].each do |method|
+      define_proxy_method[method]
+    end
+
+    def ctime
+      Time.now
+    end
+
+    alias_method :atime, :ctime
+    alias_method :mtime, :ctime
+  end
+
+  class LocalFileEntry < FileEntry
+    @file
+
+    def initialize path
+      @file = File.new path
+    end
+
+    define_proxy_method = Proc.new do |method|
+      define_method method do |*args, &block|
+        @file.send method, *args, &block
+      end
+    end
+
+    define_proxy_singleton_method = Proc.new do |method|
+      define_singleton_method method do |entry, *args, &block|
+        def entry.real_path
+          @file.path
+        end
+
+        File.send method, entry.real_path, *args, &block
+      end
+    end
+
+    [:read, :write, :size, :seek].each do |method|
+      define_proxy_method[method]
+    end
+
+    [:read, :write, :size, :binread, :binwrite].each do |method|
+      define_proxy_singleton_method[method]
+    end
+  end
+
+  class LocalDirEntry < DirEntry
+    @dir
+
+    def initialize path
+      @dir = Dir.new path
+    end
+
+    def [] name
+      return nil unless @dir.include? name
+
+      d = LocalDirEntry.new File.join(@dir.path, name)
+      d.basename = name
+      d.path = File.join(self.path, self.basename)
+      d.root = @root
+      d
+    end
+
+    def each &block
+      #@dir.each do |(name,e)| yield [name, e] end
     end
   end
 end

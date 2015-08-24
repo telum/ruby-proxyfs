@@ -1,20 +1,18 @@
 require 'proxyfs'
 require 'stringio'
 
+include ProxyFS
 
-root = {
-  'file1' => [ File, '/etc/fstab' ],
-  'file2' => [ StringIO, 'Hello, world!' ],
-  'dir1' => [ Dir, '/etc' ],
-  'dir2' => {
-    'file1' => [ StringIO, 'Blablabla' ],
-  },
-}
+$root = VirtualDirEntry.new({
+  'file1' => LocalFileEntry.new('/etc/fstab'),
+  'file2' => VirtualFileEntry.new('Hello, world!'),
+  'dir1' => LocalDirEntry.new('/etc'),
+  'dir2' => VirtualDirEntry.new({
+    'file1' => VirtualFileEntry.new('Blablabla'),
+  }),
+})
 
-Fs = ProxyFS::FS.new root
+$root.make_root
 
-MyDir  = Fs.dir
-MyFile = Fs.file
-
-puts MyFile.new('/dir2/file1').read
+$d = $root.entry '/dir1'
 
